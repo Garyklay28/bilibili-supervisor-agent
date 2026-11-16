@@ -52,6 +52,14 @@ def test_plan_rule_failures(mutate, field):
     assert not r["passed"] and any(e["field"] == field for e in r["errors"])
 
 
+def test_copyright_rule_accepts_variant_wording():
+    # 4차 실제 실행의 실제 문구: '游戏与赛事画面' 도 游戏画面 항목으로 인정해야 한다
+    plan = copy.deepcopy(GOOD_PLAN)
+    plan["copyright_checklist"] = ["游戏与赛事画面：使用官方允许范围内的素材", "BGM：只用可商用曲库",
+                                   "不搬运他人视频", "引用评论注明出处"]
+    assert plan_rules.check_plan(plan)["passed"]
+
+
 def test_prediction_detector():
     # 1차 실제 실행에서 슈퍼바이저가 쓴 문장 → 차단 대상
     assert plan_rules.find_prediction_phrases("반응이 중앙값의 1.3~1.9배 수준에 그칠 가능성이 큽니다")

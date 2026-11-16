@@ -29,10 +29,12 @@ PREDICTION_PATTERNS = [
 ]
 _PRED_RE = [re.compile(p) for p in PREDICTION_PATTERNS]
 
-COPYRIGHT_REQUIRED = {  # 체크리스트에 반드시 다뤄야 하는 항목(키워드 중 하나라도 포함)
-    "游戏画面": ["游戏画面", "游戏素材", "二创", "官方素材"],
-    "BGM": ["BGM", "背景音乐", "音乐", "配乐"],
-    "他人素材": ["他人", "第三方", "转载", "搬运", "引用", "片段"],
+# 체크리스트에 반드시 다뤄야 하는 항목(정규식). 4차 실제 실행에서 '游戏与赛事画面'을 단순 키워드
+# '游戏画面'으로 못 잡는 오판이 있어, 사이에 몇 글자가 끼어도 인식하도록 정규식으로 바꿈.
+COPYRIGHT_REQUIRED = {
+    "游戏画面": r"游戏.{0,6}(画面|素材|截图|录屏)|二创|二次创作|官方素材",
+    "BGM": r"BGM|背景音乐|音乐|配乐|音源|歌曲",
+    "他人素材": r"他人|第三方|转载|搬运|引用|片段|其他UP主|二次上传",
 }
 
 
@@ -100,8 +102,8 @@ def check_plan(plan: Dict, require_activity_tag: bool = False) -> Dict:
         err("thumbnail_brief", "缺少缩略图文案")
 
     checklist = " ".join(plan.get("copyright_checklist") or [])
-    for label, kws in COPYRIGHT_REQUIRED.items():
-        if not any(k in checklist for k in kws):
+    for label, pattern in COPYRIGHT_REQUIRED.items():
+        if not re.search(pattern, checklist):
             err("copyright_checklist", "缺少「%s」相关检查项" % label)
 
     sr = plan.get("score_reference") or {}

@@ -226,15 +226,26 @@ def h_lookup_evidence(ws: Workspace, keyword: Optional[str] = None, mission_id: 
     if not keyword and mission_id is None:
         raise ValueError("keyword 또는 mission_id 중 하나는 필요합니다")
     pool_med = metrics.rank_by_engagement(ws.videos, top=0)["median_engagement_rate"] or 1e-9
-    out: Dict[str, Any] = {"pool_size": len(ws.videos), "pool_median_engagement_rate": round(pool_med, 4)}
+    out: Dict[str, Any] = {
+        "pool_size": len(ws.videos), "pool_median_engagement_rate": round(pool_med, 4),
+        "note": "multiple_vs_pool = 전체 게임 풀 중앙값 대비, multiple_vs_game = 같은 게임 영상 중앙값 대비. "
+                "인용할 때 어느 기준인지 함께 적을 것."}
+    game_meds: Dict[str, float] = {}
     if keyword:
         rows = []
         for v in ws.videos:
             if keyword.lower() in v["title"].lower():
                 e = metrics.engagement(v)["engagement_rate"]
-                rows.append({"bvid": v["bvid"], "title": v["title"], "view": v["view"],
-                             "engagement_rate": round(e, 4), "multiple_vs_pool": round(e / pool_med, 2),
-                             "mission_id": v.get("mission_id"), "games_ko": _game_label(ws, v["title"])})
+                games = ws.alias.find_in_text(v["title"])
+                row = {"bvid": v["bvid"], "title": v["title"], "view": v["view"],
+                       "engagement_rate": round(e, 4), "multiple_vs_pool": round(e / pool_med, 2),
+                       "mission_id": v.get("mission_id"), "games_ko": [g["ko"] for g in games]}
+                if games:
+                    gid = games[0]["game_id"]
+                    if gid not in game_meds:
+                        game_meds[gid] = metrics.rank_by_engagement(ws.videos_for(gid), top=0)["median_engagement_rate"] or 1e-9
+                    row["multiple_vs_game"] = round(e / game_meds[gid], 2)
+                rows.append(row)
         out["videos"] = sorted(rows, key=lambda r: -r["view"])[:10]
         out["found"] = len(rows)
     if mission_id is not None:
