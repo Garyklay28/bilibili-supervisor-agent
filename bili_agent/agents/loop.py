@@ -62,7 +62,9 @@ def run_tool_loop(
             warnings.append("%s: 네트워크 오류 - %s" % (agent_name, exc))
             ws.log(agent_name, "api_error", "connection", ok=False)
             return None, warnings
-        ws.log(agent_name, "llm_turn", "step=%d stop=%s %.1fs" % (step + 1, resp.stop_reason, time.time() - t0))
+        in_tok, out_tok = _record_usage(ws, resp)
+        ws.log(agent_name, "llm_turn", "step=%d stop=%s %.1fs in=%d out=%d" % (
+            step + 1, resp.stop_reason, time.time() - t0, in_tok, out_tok))
 
         if resp.stop_reason == "refusal":
             warnings.append("%s: 모델이 요청을 거절함(refusal)" % agent_name)
@@ -95,6 +97,19 @@ def run_tool_loop(
 
     warnings.append("%s: 최대 단계(%d) 도달" % (agent_name, max_steps))
     return None, warnings
+
+
+def _record_usage(ws: Workspace, resp) -> Tuple[int, int]:
+    """토큰 사용량을 누적한다(비용 확인용)."""
+    usage = getattr(resp, "usage", None)
+    in_tok = (getattr(usage, "input_tokens", 0) or 0) + (getattr(usage, "cache_read_input_tokens", 0) or 0) \
+        + (getattr(usage, "cache_creation_input_tokens", 0) or 0)
+    out_tok = getattr(usage, "output_tokens", 0) or 0
+    total = ws.cache.setdefault("usage", {"llm_calls": 0, "input_tokens": 0, "output_tokens": 0})
+    total["llm_calls"] += 1
+    total["input_tokens"] += in_tok
+    total["output_tokens"] += out_tok
+    return in_tok, out_tok
 
 
 def _execute(ws: Workspace, agent_name: str, handlers: Dict[str, Callable[..., Dict]], tu) -> Dict:

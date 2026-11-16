@@ -36,6 +36,10 @@ def main() -> int:
         print("%6.1fs %-20s %-28s %s%s" % (row["t"], row["agent"], row["event"],
                                           "" if row["ok"] else "[ERROR] ", row["detail"]))
     print("\n=== 요약 ===\n" + data["summary_ko"])
+    u = data.get("usage") or {}
+    if u.get("llm_calls"):
+        print("\n=== 사용량 ===\nLLM 호출 %d회, 입력 %d 토큰, 출력 %d 토큰, 추정 비용 $%s" % (
+            u["llm_calls"], u["input_tokens"], u["output_tokens"], u.get("estimated_cost_usd", "?")))
     if data["warnings"]:
         print("\n=== 경고 ===\n- " + "\n- ".join(data["warnings"]))
 

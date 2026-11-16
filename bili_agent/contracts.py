@@ -54,6 +54,7 @@ class BiliReport:
     alias_candidates: List[Dict[str, Any]] = field(default_factory=list)  # 별칭 사전 추가 제안(사람 검토용)
     data_sources: List[Dict[str, Any]] = field(default_factory=list)
     agent_trace: List[Dict[str, Any]] = field(default_factory=list)
+    usage: Dict[str, Any] = field(default_factory=dict)  # LLM 호출 수·토큰·추정 비용
     warnings: List[str] = field(default_factory=list)
     platform: str = "bilibili"
 

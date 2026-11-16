@@ -143,6 +143,15 @@ def _worker_context(ws: Workspace) -> str:
     return "\n".join(lines)
 
 
+def _usage_with_cost(ws: Workspace) -> Dict:
+    u = dict(ws.cache.get("usage") or {"llm_calls": 0, "input_tokens": 0, "output_tokens": 0})
+    price = config.PRICE_PER_MTOK.get(config.MODEL)
+    if price:
+        u["model"] = config.MODEL
+        u["estimated_cost_usd"] = round(u["input_tokens"] / 1e6 * price[0] + u["output_tokens"] / 1e6 * price[1], 4)
+    return u
+
+
 def build_report(ws: Workspace, summary_ko: str) -> BiliReport:
     """워커 결과 + 결정적 계산값을 BiliReport 로 조립.
 
@@ -178,6 +187,6 @@ def build_report(ws: Workspace, summary_ko: str) -> BiliReport:
         title_diagnosis=title_diag, duration_advice=duration,
         overseas_trend_cards=f.get("localizer", {}).get("cards", []),
         alias_candidates=f.get("collector", {}).get("alias_candidates", []),
-        data_sources=ws.data_sources, agent_trace=ws.trace,
+        data_sources=ws.data_sources, agent_trace=ws.trace, usage=_usage_with_cost(ws),
         warnings=list(dict.fromkeys(ws.warnings)),
     )
