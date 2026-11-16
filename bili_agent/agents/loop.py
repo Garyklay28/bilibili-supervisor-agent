@@ -41,8 +41,12 @@ def run_tool_loop(
     first_message: str,
     terminal_tool: str,
     max_steps: int,
+    terminal_check: Optional[Callable[[Dict], Optional[str]]] = None,
 ) -> Tuple[Optional[Dict], List[str]]:
-    """도구 호출 루프. (종료 도구의 입력, 경고 목록)을 돌려준다."""
+    """도구 호출 루프. (종료 도구의 입력, 경고 목록)을 돌려준다.
+
+    terminal_check 가 오류 문자열을 돌려주면 제출을 거부하고(is_error) 모델에게 고치게 한다.
+    """
     messages: List[Dict] = [{"role": "user", "content": first_message}]
     warnings: List[str] = []
     nudged = False
@@ -85,6 +89,12 @@ def run_tool_loop(
         results, terminal_input = [], None
         for tu in tool_uses:
             if tu.name == terminal_tool:
+                problem = terminal_check(dict(tu.input)) if terminal_check else None
+                if problem:
+                    results.append({"type": "tool_result", "tool_use_id": tu.id, "is_error": True,
+                                    "content": "제출 거부: " + problem})
+                    ws.log(agent_name, "submit_rejected", problem, ok=False)
+                    continue
                 terminal_input = dict(tu.input)
                 results.append({"type": "tool_result", "tool_use_id": tu.id, "content": "제출 완료"})
                 ws.log(agent_name, "submit", tu.name)

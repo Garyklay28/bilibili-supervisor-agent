@@ -1,7 +1,11 @@
 """빌리빌리 서브 슈퍼바이저.
 
-총괄 슈퍼바이저(팀원 담당) ──BiliTask──▶ BiliSupervisor ──delegate──▶ 5개 워커
+총괄 슈퍼바이저(팀원 담당) ──BiliTask──▶ BiliSupervisor ──delegate──▶ 7개 워커
                            ◀──BiliReport──                ◀─findings──
+                              (+ 策划案 JSON)
+
+流水线设计 A: 1 采集·2 规范化(collector) → 3 评分(code) → 4 分析(trend_radar, engagement_analyst,
+title_doctor) → 5 策划案生成(plan_writer) → 6 校验(validator) → 策划案 JSON + Markdown
 
 - run()     : Claude 가 슈퍼바이저 역할로 워커 호출 순서를 스스로 결정 (실제 PoC)
 - run_dry() : LLM 없이 intent별 기본 계획을 코드로 실행 (API 키 없이 데이터 파이프라인 확인·테스트용)
@@ -11,15 +15,18 @@ from typing import Dict, List, Optional
 
 from .. import config
 from ..contracts import BiliReport, BiliTask
-from ..tools import metrics
+from ..tools import metrics, plan_rules
 from ..tools.alias_store import AliasStore
 from ..workspace import Workspace
 from .loop import LLM, run_tool_loop
-from .workers import WORKERS, h_get_game_scores, h_get_top_titles
+from .workers import WORKERS, assemble_plan, h_get_game_scores, h_get_top_titles
+
+MAX_PLAN_REVISIONS = 1  # 검증 실패 시 plan_writer 에게 되돌려 보내는 최대 횟수
 
 DEFAULT_PLANS = {
-    "trend_scan": ["collector", "trend_radar", "engagement_analyst", "localizer"],
-    "game_deep_dive": ["collector", "trend_radar", "engagement_analyst", "title_doctor", "localizer"],
+    "trend_scan": ["collector", "trend_radar", "engagement_analyst", "localizer", "plan_writer", "validator"],
+    "game_deep_dive": ["collector", "trend_radar", "engagement_analyst", "title_doctor", "localizer",
+                       "plan_writer", "validator"],
     "title_check": ["collector", "title_doctor"],
     "event_watch": ["collector", "trend_radar"],
 }
@@ -54,7 +61,8 @@ class BiliSupervisor:
         first = task.to_prompt() + "\n\n위 BiliTask를 처리하세요."
         result, warns = run_tool_loop(self.llm, ws, "supervisor", system, SUPERVISOR_TOOLS,
                                       {"delegate": self._delegate}, first, "submit_report",
-                                      config.SUPERVISOR_MAX_STEPS)
+                                      config.SUPERVISOR_MAX_STEPS,
+                                      terminal_check=lambda inp: _check_report_submission(ws, inp))
         ws.warnings += warns
         if result is None:
             return build_report(ws, "슈퍼바이저가 보고서를 완성하지 못했습니다. warnings 를 확인하세요.")
@@ -68,6 +76,14 @@ class BiliSupervisor:
         if spec.needs_data and not ws.collected:
             # 코드 수준 가드레일: 순서는 LLM 이 정하지만, 데이터 없이 분석하는 일은 막는다.
             raise RuntimeError("아직 수집된 데이터가 없습니다. 먼저 collector 를 호출하세요.")
+        if spec.requires and spec.requires not in ws.findings:
+            raise RuntimeError("%s 는 %s 의 결과가 있어야 호출할 수 있습니다." % (worker, spec.requires))
+        if worker == "plan_writer" and "plan_writer" in ws.findings:
+            revisions = ws.cache.get("plan_version", 1)
+            if revisions > MAX_PLAN_REVISIONS:
+                raise RuntimeError("기획안 수정은 최대 %d회입니다. 현재 결과로 submit_report 하고 warnings 에 남기세요."
+                                   % MAX_PLAN_REVISIONS)
+            ws.cache["plan_version"] = revisions + 1
         ws.log("supervisor", "delegate→" + worker, instruction)
         context = _worker_context(ws)
         findings, warns = run_tool_loop(self.llm, ws, worker, spec.system_prompt, spec.all_tools,
@@ -77,6 +93,13 @@ class BiliSupervisor:
         if findings is None:
             return {"worker": worker, "ok": False, "warnings": warns}
         ws.findings[worker] = findings
+        if worker == "plan_writer":
+            ws.cache.pop("plan_validation", None)  # 새 기획안은 다시 검증받아야 한다
+            ws.cache.pop("plan_rule_check", None)
+            return {"worker": worker, "ok": True, "plan_id": assemble_plan(ws)["plan_id"],
+                    "summary_ko": findings.get("summary_ko"), "next": "validator 로 검증하세요"}
+        if worker == "validator":
+            return {"worker": worker, "ok": True, **_record_validation(ws, findings)}
         return {"worker": worker, "ok": True, "findings": findings}
 
     # ── LLM 없는 실행 (dry-run) ────────────────────────────
@@ -86,7 +109,8 @@ class BiliSupervisor:
         ws.log("supervisor(dry)", "task", task.to_prompt().replace("\n", " | "))
         gid = ws.requested_game["game_id"] if ws.requested_game else None
         for worker in DEFAULT_PLANS[task.intent]:
-            ws.log("supervisor(dry)", "delegate→" + worker, "default plan")
+            if worker not in ("plan_writer", "validator"):
+                ws.log("supervisor(dry)", "delegate→" + worker, "default plan")
             spec = WORKERS[worker]
             if worker == "collector":
                 c = spec.handlers["collect_popular_games"](ws)
@@ -125,6 +149,8 @@ class BiliSupervisor:
                 ws.findings[worker] = {"summary_ko": "(dry-run) 번역은 LLM 실행 시 생성.", "cards": [
                     {"source_bvid": t["bvid"], "title_zh": t["title"], "title_ko": "(LLM 실행 시 번역)",
                      "why_ko": "반응률 배수 %.2f" % t["engagement_multiple"]} for t in tops]}
+            elif worker in ("plan_writer", "validator"):
+                ws.log("supervisor(dry)", "skip", "%s 는 LLM 실행 시에만 생성" % worker)
         return build_report(ws, "(dry-run) LLM 없이 기본 계획으로 실행한 결과입니다. 숫자는 실제 계산값입니다.")
 
 
@@ -141,6 +167,37 @@ def _worker_context(ws: Workspace) -> str:
     for name, f in ws.findings.items():
         lines.append("[%s 요약] %s" % (name, f.get("summary_ko", "")))
     return "\n".join(lines)
+
+
+def _record_validation(ws: Workspace, reviewer: Dict) -> Dict:
+    """규칙 검사(코드) + 검증 워커(LLM) 판정을 합친다. 규칙 검사 실패는 LLM 이 통과시켜도 실패."""
+    plan = assemble_plan(ws)
+    rule = ws.cache.get("plan_rule_check")
+    if rule is None:  # 검증 워커가 규칙 검사를 빠뜨렸어도 코드가 반드시 실행한다
+        has_activity = any(e["game_id"] == plan["game_id"] for e in metrics.event_signals(ws.videos, ws.alias))
+        rule = plan_rules.check_plan(plan, require_activity_tag=has_activity)
+    result = {"plan_id": plan["plan_id"], "passed": bool(rule["passed"] and reviewer.get("passed")),
+              "rule_check": rule, "reviewer": {"passed": reviewer.get("passed"), "issues": reviewer.get("issues", [])}}
+    ws.cache["plan_validation"] = result
+    revisions_left = MAX_PLAN_REVISIONS - (ws.cache.get("plan_version", 1) - 1)
+    result["next"] = ("submit_report 가능" if result["passed"] else
+                      "plan_writer 에게 issues 를 전달해 수정 (남은 수정 %d회)" % revisions_left if revisions_left > 0 else
+                      "수정 횟수 소진: submit_report 하고 warnings 에 미통과 사실을 남기세요")
+    return result
+
+
+def _check_report_submission(ws: Workspace, inp: Dict) -> Optional[str]:
+    """submit_report 직전 코드 검사: 예측 표현 차단, 기획안 미검증 차단."""
+    text = " ".join([inp.get("summary_ko", "")] + list(inp.get("warnings", [])))
+    hits = plan_rules.find_prediction_phrases(text)
+    if hits:
+        return ("summary_ko/warnings 에 조회수·반응 예측 표현이 있습니다: %s. 점수는 정렬 참고용이므로, "
+                "과거 데이터 사실로만 다시 쓰세요." % " / ".join("「%s」" % h for h in hits))
+    if "plan_writer" in ws.findings:
+        v = ws.cache.get("plan_validation")
+        if v is None:
+            return "기획안이 아직 검증되지 않았습니다. validator 를 먼저 호출하세요."
+    return None
 
 
 def _usage_with_cost(ws: Workspace) -> Dict:
@@ -180,7 +237,15 @@ def build_report(ws: Workspace, summary_ko: str) -> BiliReport:
     for note in f.get("collector", {}).get("data_quality_notes", []):
         ws.warnings.append("collector: " + note)
 
+    plan = assemble_plan(ws)
+    validation = ws.cache.get("plan_validation")
+    if plan is not None:
+        plan["status"] = "validated" if validation and validation["passed"] else "needs_review"
+        if plan["status"] == "needs_review":
+            ws.warnings.append("策划案 %s 未通过校验，需要人工审核" % plan["plan_id"])
+
     return BiliReport(
+        plan=plan, plan_validation=validation,
         task_id=ws.task.task_id, intent=ws.task.intent, summary_ko=summary_ko,
         opportunities=opportunities,
         events=f.get("trend_radar", {}).get("events", []),

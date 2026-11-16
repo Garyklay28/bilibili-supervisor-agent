@@ -13,8 +13,12 @@
                     ◀─BiliReport──        (Claude)                 ├────▶ trend_radar
                                                                     ├────▶ engagement_analyst
                                                                     ├────▶ title_doctor
-                                                                    └────▶ localizer
+                                                                    ├────▶ localizer
+                                                                    ├────▶ plan_writer ─┐ 실패 시
+                                                                    └────▶ validator ◀──┘ 1회 수정
 ```
+
+팀 **流水线设计 A**(采集 → 规范化 → 评分 → 分析 → 策划案生成 → 校验)를 빌리빌리용으로 구현했고, 최종 산출물은 **策划案 JSON**(영상 파이프라인 B의 입력) + 팀 공유용 Markdown 문서입니다.
 
 | 워커 | 기획안 기능 |
 |---|---|
@@ -23,6 +27,8 @@
 | `engagement_analyst` | 반응률 정렬(Top 풀 중앙값 대비 배수) · 영상 길이 제안 · 유형 분포 · 소재 점수 |
 | `title_doctor` | 제목 진단(글자 수·【】·《》) · 중국어 수정안 |
 | `localizer` | 중국어 제목 → 한국어 '해외 트렌드 소재' 카드 (YouTube·TikTok 모드 연결) |
+| `plan_writer` | 策划案 생성(간체 중국어): 훅 3종 · 구간별 스크립트 · 제목 3개 · 썸네일 brief · 저작권 체크리스트 |
+| `validator` | 策划案 검증: 코드 규칙 검사(구조·시간·저작권·'仅供排序参考'·예측 표현) + LLM 의미 검토 |
 
 자세한 구조, 설계 원칙, 기획안 매핑은 **[docs/architecture.md](docs/architecture.md)**.
 시스템 프롬프트는 **[bili_agent/prompts/](bili_agent/prompts/)** (한국어).
@@ -49,7 +55,8 @@ python main.py --intent event_watch
 python -m pytest -q
 ```
 
-결과는 터미널에 에이전트 실행 기록·요약·경고가 출력되고, 전체 `BiliReport`는 `outputs/report_*.json`에 저장됩니다.
+결과는 터미널에 에이전트 실행 기록·요약·사용량·경고가 출력되고, 전체 `BiliReport`는 `outputs/report_*.json`에 저장됩니다.
+`trend_scan` / `game_deep_dive` 는 策划案도 만들어 `outputs/report_*_plan.json`(B 파이프라인 입력)과 `*_plan.md`(팀 공유 문서)를 함께 저장합니다.
 
 ## 데이터 수집 원칙
 
@@ -76,13 +83,14 @@ bili_agent/
   config.py             모델·수집 설정 (.env)
   workspace.py          공유 작업 공간(블랙보드)
   agents/
-    supervisor.py       빌리빌리 서브 슈퍼바이저 (LLM 모드 / dry-run 모드), 보고서 조립
-    workers.py          5개 워커: 도구 스키마 + 핸들러 + 제출 스키마
-    loop.py             Claude API 호출, 공용 tool-use 루프, 오류·거절 처리
-  prompts/              시스템 프롬프트 6개 (supervisor + 워커 5)
+    supervisor.py       빌리빌리 서브 슈퍼바이저 (LLM 모드 / dry-run 모드), 검증 루프, 보고서 조립
+    workers.py          7개 워커: 도구 스키마 + 핸들러 + 제출 스키마, 策划案 조립
+    loop.py             Claude API 호출, 공용 tool-use 루프, 오류·거절·제출 거부 처리
+  prompts/              시스템 프롬프트 8개 (supervisor + 워커 7)
   tools/
     bilibili_api.py     공개 API 수집 + 스냅샷 대체
     metrics.py          반응률·배수·길이/유형 분포·제목 진단·Score_bili (결정적 계산)
+    plan_rules.py       策划案 규격·규칙 검사·예측 표현 차단·Markdown 변환
     alias_store.py      별칭 사전 (로컬 JSON / Supabase)
 data/                   별칭 사전, 스냅샷
 supabase/schema.sql     game_alias, bili_video_snapshot, bili_agent_report 등

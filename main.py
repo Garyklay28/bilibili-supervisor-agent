@@ -14,6 +14,7 @@ from pathlib import Path
 
 from bili_agent.agents.supervisor import BiliSupervisor
 from bili_agent.contracts import INTENTS, BiliTask
+from bili_agent.tools.plan_rules import plan_to_markdown
 
 
 def main() -> int:
@@ -47,6 +48,13 @@ def main() -> int:
     out.parent.mkdir(parents=True, exist_ok=True)
     out.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
     print("\n보고서 저장: %s" % out)
+
+    if data.get("plan"):  # 流水线设计 A 산출물: 策划案 JSON + 팀 공유용 문서
+        plan = data["plan"]
+        stem = out.with_name(out.stem + "_plan")
+        stem.with_suffix(".json").write_text(json.dumps(plan, ensure_ascii=False, indent=2), encoding="utf-8")
+        stem.with_suffix(".md").write_text(plan_to_markdown(plan, data.get("plan_validation")), encoding="utf-8")
+        print("策划案 저장: %s.json / .md (status=%s)" % (stem, plan.get("status")))
     return 0
 
 

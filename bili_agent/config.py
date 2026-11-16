@@ -21,7 +21,7 @@ MAX_TOKENS = int(os.getenv("BILI_AGENT_MAX_TOKENS", "8000"))
 # 안전 분류기가 요청을 거절(refusal)하면 서버 측에서 대체 모델로 자동 재시도한다.
 ENABLE_REFUSAL_FALLBACK = os.getenv("BILI_AGENT_FALLBACK", "1") == "1"
 # 슈퍼바이저 루프 / 워커 루프의 최대 반복 횟수(무한 루프 방지)
-SUPERVISOR_MAX_STEPS = int(os.getenv("BILI_SUPERVISOR_MAX_STEPS", "8"))
+SUPERVISOR_MAX_STEPS = int(os.getenv("BILI_SUPERVISOR_MAX_STEPS", "12"))  # 워커 7개 + 검증 루프 1회 + 여유
 WORKER_MAX_STEPS = int(os.getenv("BILI_WORKER_MAX_STEPS", "6"))
 # 비용 추정용 단가(USD / 100만 토큰, 입력·출력). 2026-11 Anthropic 공시 기준, 캐시 할인 미반영.
 PRICE_PER_MTOK = {"claude-sonnet-5-5": (2.0, 10.0), "claude-opus-5-5": (4.0, 20.0), "claude-haiku-5-5": (0.10, 0.50)}

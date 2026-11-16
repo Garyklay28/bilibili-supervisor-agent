@@ -1,4 +1,4 @@
-"""5개 워커의 정의: 시스템 프롬프트 + 도구 스키마 + 도구 구현(핸들러) + 제출 스키마.
+"""7개 워커의 정의: 시스템 프롬프트 + 도구 스키마 + 도구 구현(핸들러) + 제출 스키마.
 
 모든 핸들러는 (workspace, **tool_input) → JSON 직렬화 가능한 dict 를 돌려준다.
 핸들러는 결정적 코드(tools/)만 호출하며, LLM 은 핸들러 결과를 읽고 판단만 한다.
@@ -7,7 +7,7 @@ from dataclasses import dataclass
 from typing import Any, Callable, Dict, List, Optional
 
 from .. import config
-from ..tools import bilibili_api, metrics
+from ..tools import bilibili_api, metrics, plan_rules
 from ..workspace import Workspace
 
 Handler = Callable[..., Dict[str, Any]]
@@ -31,6 +31,7 @@ class WorkerSpec:
     handlers: Dict[str, Handler]
     submit_tool: Dict
     needs_data: bool = True  # True 면 collector 실행 전에는 호출 불가
+    requires: Optional[str] = None  # 먼저 결과를 낸 워커가 있어야 호출 가능(예: validator ← plan_writer)
 
     @property
     def system_prompt(self) -> str:
@@ -159,6 +160,83 @@ def h_diagnose_title(ws: Workspace, title: str) -> Dict:
     return diag
 
 
+# ── plan_writer (流水线设计 A-5 策划案生成) ─────────────────
+
+def _target_game(ws: Workspace, game_id: Optional[str]) -> Optional[Dict]:
+    if game_id:
+        return ws.alias.resolve_id(game_id)
+    if ws.requested_game:
+        return ws.requested_game
+    scores = ws.cache.get("game_scores") or metrics.score_games(ws.videos, ws.keywords, ws.alias)
+    return ws.alias.resolve_id(scores[0]["game_id"]) if scores else None
+
+
+def h_get_plan_context(ws: Workspace, game_id: Optional[str] = None) -> Dict:
+    """기획에 필요한 근거를 한 번에 모아 준다(앞선 워커 결과 + 계산값)."""
+    g = _target_game(ws, game_id)
+    if not g:
+        raise ValueError("기획 대상 게임을 정할 수 없습니다. game_id 를 지정하세요.")
+    gid = g["game_id"]
+    scores = ws.cache.get("game_scores") or metrics.score_games(ws.videos, ws.keywords, ws.alias)
+    dist = metrics.duration_and_type_distribution(ws.videos_for(gid))
+    activities = [e for e in metrics.event_signals(ws.videos, ws.alias) if e["game_id"] == gid]
+    ctx = {
+        "game": {"game_id": gid, "zh": g["zh"], "ko": g["ko"], "en": g["en"]},
+        "score": next((s for s in scores if s["game_id"] == gid), None),
+        "official_activities": activities[:3],
+        "duration_distribution": dist["duration_buckets"],
+        "type_distribution": dist["type_distribution"],
+        "content_type_map(분석 유형→기획 유형, null=가장 가까운 것 선택)": plan_rules.CONTENT_TYPE_MAP,
+        "title_benchmark": metrics.title_benchmark(ws.videos_for(gid)),
+        "top_titles": h_get_top_titles(ws, n=8, game_id=gid)["titles"],
+        "earlier_findings": {k: v.get("summary_ko") for k, v in ws.findings.items()},
+        "duration_advice": ws.findings.get("engagement_analyst", {}).get("duration_advice"),
+        "constraints": {"content_type": plan_rules.CONTENT_TYPES, "hook_types": plan_rules.HOOK_TYPES,
+                        "sections_in_order": plan_rules.SECTIONS, "copyright_must_cover": list(plan_rules.COPYRIGHT_REQUIRED)},
+    }
+    last = ws.cache.get("plan_validation")
+    if last and not last.get("passed"):
+        ctx["previous_validation_failed"] = last  # 수정 요청 시 이전 검증 결과를 함께 준다
+    return ctx
+
+
+def assemble_plan(ws: Workspace) -> Optional[Dict]:
+    """plan_writer 제출값 + 코드가 채우는 필드(plan_id, platform, score_reference, data_sources)."""
+    p = ws.findings.get("plan_writer")
+    if not p:
+        return None
+    g = ws.alias.resolve_id(p.get("game_id", "")) or _target_game(ws, None) or {}
+    scores = ws.cache.get("game_scores") or metrics.score_games(ws.videos, ws.keywords, ws.alias)
+    s = next((x for x in scores if x["game_id"] == g.get("game_id")), None)
+    plan = {k: p.get(k) for k in ("content_type", "target_duration_sec", "hooks", "selected_hook", "script_sections",
+                                  "titles", "thumbnail_brief", "copyright_checklist", "rationale_zh", "platform_extras")}
+    plan.update({
+        "schema": plan_rules.PLAN_SCHEMA_VERSION,
+        "plan_id": "bili-%s-%s-v%d" % (ws.task.task_id, g.get("game_id", "unknown"), ws.cache.get("plan_version", 1)),
+        "platform": "bilibili", "game": g.get("zh"), "game_id": g.get("game_id"),
+        "score_reference": {"score": s and s["score"], "components": s and s["components"],
+                            "note": plan_rules.SCORE_DISCLAIMER},
+        "data_sources": ws.data_sources,
+    })
+    return plan
+
+
+# ── validator (流水线设计 A-6 校验) ──────────────────────────
+
+def h_get_plan(ws: Workspace) -> Dict:
+    return assemble_plan(ws) or {"error": "아직 기획안이 없습니다"}
+
+
+def h_run_rule_checks(ws: Workspace) -> Dict:
+    plan = assemble_plan(ws)
+    if plan is None:
+        raise RuntimeError("아직 기획안이 없습니다")
+    has_activity = any(e["game_id"] == plan["game_id"] for e in metrics.event_signals(ws.videos, ws.alias))
+    result = plan_rules.check_plan(plan, require_activity_tag=has_activity)
+    ws.cache["plan_rule_check"] = result
+    return result
+
+
 # ── 워커 명세 ─────────────────────────────────────────────
 
 GET_SCORES = tool("get_game_scores", "게임별 소재 점수(Score_bili)와 구성 요소를 점수 순으로 반환.",
@@ -245,5 +323,44 @@ WORKERS: Dict[str, WorkerSpec] = {
             "source_bvid": {"type": "string"}, "title_zh": {"type": "string"}, "title_ko": {"type": "string"},
             "slang_note_ko": {"type": "string"}, "why_ko": {"type": "string"}, "adapt_tip_ko": {"type": "string"}},
             "required": ["source_bvid", "title_zh", "title_ko", "why_ko"]}}}, ["cards"]),
+    ),
+    "plan_writer": WorkerSpec(
+        name="plan_writer", prompt_file="plan_writer.md",
+        tools=[tool("get_plan_context", "기획에 필요한 근거(점수·공식 활동·길이/유형 분포·제목 벤치마크·상위 제목·제약 조건)를 한 번에 반환. "
+                    "이전 검증이 실패했다면 그 결과도 포함.", GAME_ID_PROP)],
+        handlers={"get_plan_context": h_get_plan_context},
+        submit_tool=submit({
+            "game_id": {"type": "string"},
+            "content_type": {"type": "string", "enum": plan_rules.CONTENT_TYPES},
+            "target_duration_sec": {"type": "integer"},
+            "hooks": {"type": "array", "items": {"type": "object", "properties": {
+                "type": {"type": "string", "enum": plan_rules.HOOK_TYPES}, "line_zh": {"type": "string"}},
+                "required": ["type", "line_zh"]}},
+            "selected_hook": {"type": "string", "enum": plan_rules.HOOK_TYPES},
+            "script_sections": {"type": "array", "items": {"type": "object", "properties": {
+                "section": {"type": "string", "enum": plan_rules.SECTIONS}, "start_sec": {"type": "integer"},
+                "end_sec": {"type": "integer"}, "points_zh": {"type": "string"}},
+                "required": ["section", "start_sec", "end_sec", "points_zh"]}},
+            "titles": STR_LIST,
+            "thumbnail_brief": {"type": "object", "properties": {
+                "aspect_ratio": {"type": "string"}, "text_zh": {"type": "string"}, "style_zh": {"type": "string"}},
+                "required": ["aspect_ratio", "text_zh", "style_zh"]},
+            "copyright_checklist": STR_LIST,
+            "rationale_zh": {"type": "string", "description": "选题依据(引用工具给出的数据)"},
+            "platform_extras": {"type": "object", "properties": {
+                "activity_mission_id": {"type": "integer"}, "tags_zh": STR_LIST}},
+        }, ["game_id", "content_type", "target_duration_sec", "hooks", "selected_hook", "script_sections",
+            "titles", "thumbnail_brief", "copyright_checklist", "rationale_zh"]),
+    ),
+    "validator": WorkerSpec(
+        name="validator", prompt_file="validator.md", requires="plan_writer",
+        tools=[tool("get_plan", "검증할 기획안 JSON(코드가 채운 plan_id·점수·데이터 출처 포함)."),
+               tool("run_rule_checks", "결정적 규칙 검사: 구조·시간 구간·저작권 필수 항목·'仅供排序参考' 표기·조회수 예측 표현.")],
+        handlers={"get_plan": h_get_plan, "run_rule_checks": h_run_rule_checks},
+        submit_tool=submit({
+            "passed": {"type": "boolean", "description": "규칙 검사 errors 가 없고 의미상 문제도 없을 때만 true"},
+            "issues": {"type": "array", "items": {"type": "object", "properties": {
+                "field": {"type": "string"}, "problem": {"type": "string"}, "fix_hint": {"type": "string"}},
+                "required": ["field", "problem"]}}}, ["passed", "issues"]),
     ),
 }
