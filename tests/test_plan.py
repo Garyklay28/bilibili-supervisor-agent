@@ -66,6 +66,20 @@ def test_markdown_render():
     assert "## 开场钩子（3 种）" in md and "✅ 采用" in md and plan_rules.SCORE_DISCLAIMER in md
 
 
+def test_lookup_evidence_finds_source_data():
+    # 3차 실제 실행에서 validator 가 데이터에 있는 곡을 '근거 없음'으로 오판 → 원본 조회 도구로 해결
+    from bili_agent.agents.workers import h_lookup_evidence
+    from bili_agent.workspace import Workspace
+    ws = Workspace(BiliTask(intent="trend_scan"), AliasStore.load())
+    ws.add_videos(VIDEOS)
+    r = h_lookup_evidence(ws, keyword="明日方舟")
+    assert r["found"] == 1 and r["videos"][0]["bvid"] == "BV2" and r["videos"][0]["multiple_vs_pool"] > 1
+    act = h_lookup_evidence(ws, mission_id=11)["activity"]
+    assert act and act[0]["game_id"] == "genshin_impact"
+    with pytest.raises(ValueError):
+        h_lookup_evidence(ws)
+
+
 # ── 슈퍼바이저 + 가짜 LLM: 생성 → 검증 → 제출 흐름 ──────────
 
 def _tu(name, inp, i):

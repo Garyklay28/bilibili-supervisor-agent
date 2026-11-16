@@ -221,6 +221,35 @@ def assemble_plan(ws: Workspace) -> Optional[Dict]:
     return plan
 
 
+def h_lookup_evidence(ws: Workspace, keyword: Optional[str] = None, mission_id: Optional[int] = None) -> Dict:
+    """원본 데이터에서 근거를 직접 찾는다(제목 키워드 / 공식 활동 ID). 기획·검증 양쪽이 같은 데이터를 본다."""
+    if not keyword and mission_id is None:
+        raise ValueError("keyword 또는 mission_id 중 하나는 필요합니다")
+    pool_med = metrics.rank_by_engagement(ws.videos, top=0)["median_engagement_rate"] or 1e-9
+    out: Dict[str, Any] = {"pool_size": len(ws.videos), "pool_median_engagement_rate": round(pool_med, 4)}
+    if keyword:
+        rows = []
+        for v in ws.videos:
+            if keyword.lower() in v["title"].lower():
+                e = metrics.engagement(v)["engagement_rate"]
+                rows.append({"bvid": v["bvid"], "title": v["title"], "view": v["view"],
+                             "engagement_rate": round(e, 4), "multiple_vs_pool": round(e / pool_med, 2),
+                             "mission_id": v.get("mission_id"), "games_ko": _game_label(ws, v["title"])})
+        out["videos"] = sorted(rows, key=lambda r: -r["view"])[:10]
+        out["found"] = len(rows)
+    if mission_id is not None:
+        out["activity"] = [e for e in metrics.event_signals(ws.videos, ws.alias) if e["mission_id"] == int(mission_id)]
+    return out
+
+
+LOOKUP_EVIDENCE = tool(
+    "lookup_evidence",
+    "수집된 원본 데이터에서 근거를 직접 조회. keyword 가 제목에 들어간 영상(조회수·반응률·배수·활동 ID), "
+    "또는 mission_id 공식 활동의 게임별 영상 수·합계 조회수. 기획안의 사실·숫자 확인용.",
+    {"keyword": {"type": "string", "description": "제목 부분 일치 검색어(예: 春庭雪)"},
+     "mission_id": {"type": "integer", "description": "공식 활동 ID"}})
+
+
 # ── validator (流水线设计 A-6 校验) ──────────────────────────
 
 def h_get_plan(ws: Workspace) -> Dict:
@@ -327,8 +356,8 @@ WORKERS: Dict[str, WorkerSpec] = {
     "plan_writer": WorkerSpec(
         name="plan_writer", prompt_file="plan_writer.md",
         tools=[tool("get_plan_context", "기획에 필요한 근거(점수·공식 활동·길이/유형 분포·제목 벤치마크·상위 제목·제약 조건)를 한 번에 반환. "
-                    "이전 검증이 실패했다면 그 결과도 포함.", GAME_ID_PROP)],
-        handlers={"get_plan_context": h_get_plan_context},
+                    "이전 검증이 실패했다면 그 결과도 포함.", GAME_ID_PROP), LOOKUP_EVIDENCE],
+        handlers={"get_plan_context": h_get_plan_context, "lookup_evidence": h_lookup_evidence},
         submit_tool=submit({
             "game_id": {"type": "string"},
             "content_type": {"type": "string", "enum": plan_rules.CONTENT_TYPES},
@@ -355,8 +384,9 @@ WORKERS: Dict[str, WorkerSpec] = {
     "validator": WorkerSpec(
         name="validator", prompt_file="validator.md", requires="plan_writer",
         tools=[tool("get_plan", "검증할 기획안 JSON(코드가 채운 plan_id·점수·데이터 출처 포함)."),
-               tool("run_rule_checks", "결정적 규칙 검사: 구조·시간 구간·저작권 필수 항목·'仅供排序参考' 표기·조회수 예측 표현.")],
-        handlers={"get_plan": h_get_plan, "run_rule_checks": h_run_rule_checks},
+               tool("run_rule_checks", "결정적 규칙 검사: 구조·시간 구간·저작권 필수 항목·'仅供排序参考' 표기·조회수 예측 표현."),
+               LOOKUP_EVIDENCE],
+        handlers={"get_plan": h_get_plan, "run_rule_checks": h_run_rule_checks, "lookup_evidence": h_lookup_evidence},
         submit_tool=submit({
             "passed": {"type": "boolean", "description": "규칙 검사 errors 가 없고 의미상 문제도 없을 때만 true"},
             "issues": {"type": "array", "items": {"type": "object", "properties": {
