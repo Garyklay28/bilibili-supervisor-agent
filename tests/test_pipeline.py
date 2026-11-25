@@ -56,6 +56,13 @@ def test_alias_resolve_all_scripts(alias):
     assert [g["game_id"] for g in alias.find_in_text("BLG夺冠！S16决赛")] == ["league_of_legends"]
 
 
+def test_longer_alias_wins(alias):
+    # 2026-11-25 Aside 재수집: '明日方舟：终末地'(엔드필드)가 '明日方舟'(명일방주)로도 세지던 문제
+    assert [g["game_id"] for g in alias.find_in_text("《明日方舟：终末地》小刻EP 明日方舟终末地")] == ["arknights_endfield"]
+    assert [g["game_id"] for g in alias.find_in_text("明日方舟 斗蛐蛐")] == ["arknights"]
+    assert alias.find_in_text("IMC大赛") == []  # 짧은 영문 별칭 'MC' 는 단어 경계가 있어야
+
+
 def test_engagement_distribution_title():
     r = metrics.rank_by_engagement(VIDEOS, top=5)
     assert r["top"][0]["bvid"] == "BV2" and r["top"][0]["engagement_multiple"] > 1
