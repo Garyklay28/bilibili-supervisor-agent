@@ -72,6 +72,14 @@ def test_engagement_distribution_title():
     assert diag["features"]["square_brackets"] == 1
 
 
+def test_unknown_duration_not_counted_as_zero():
+    vids = [dict(v, duration_sec=None) for v in VIDEOS[:3]] + VIDEOS[3:]
+    d = metrics.duration_and_type_distribution(vids)
+    assert d["videos_without_duration"] == 3 and d["videos_with_duration"] == 2
+    assert d["duration_buckets"][0]["count"] == 0          # '1분 미만' 에 길이 모르는 영상이 들어가지 않음
+    assert sum(b["count"] for b in d["duration_buckets"]) == 2
+
+
 def test_scores_include_leading_signal_game(alias):
     ids = [s["game_id"] for s in metrics.score_games(VIDEOS, KEYWORDS, alias, now=NOW)]
     assert "delta_force" in ids  # 핫키워드에만 있고 영상은 없는 게임도 후보

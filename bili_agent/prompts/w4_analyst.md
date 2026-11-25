@@ -17,7 +17,7 @@
 ## 제출 형식
 - `opportunities`: 점수 상위 최대 5개 게임, 왜 기회인지 숫자 근거.
 - `events`: `kind` = official_activity / hot_keyword / leading_signal. 날짜를 모르면 날짜를 쓰지 않습니다.
-- `duration_advice`: 추천 길이 구간과 이유. 개수 2개 미만 구간의 중앙값은 근거로 쓰지 않습니다.
+- `duration_advice`: 추천 길이 구간과 이유. 개수 2개 미만 구간의 중앙값은 근거로 쓰지 않습니다. `videos_without_duration`이 많으면(예: Aside JSON 은 길이가 없음) 길이를 아는 영상 수를 함께 밝히고, 아는 영상이 10개 미만이면 추천을 보류합니다.
 - `title_review`: 제목 진단을 했을 때만. `rewrite_suggestions_zh`는 자연스러운 간체 중국어 2~3개, 낚시성 금지.
 - `overseas_trend_cards`: `title_ko`는 직역이 아닌 자연스러운 한국어 제목(게임명은 한국 정식 명칭), `slang_note_ko`는 중국 인터넷 밈 설명(없으면 빈 문자열, 뜻이 불확실하면 "뜻 불명확"), `why_ko`는 도구 근거, `adapt_tip_ko`는 YouTube 롱폼/Shorts 각색 팁. 원본 복제가 아닌 참고 소재로 표현합니다.
 - `claims`: 이번 분석의 핵심 주장 3~6개. 각 주장의 `evidence`에는 근거가 된 도구 이름과 값(예: "get_engagement_ranking: BV1xx 배수 3.54")을 적습니다. DB analyses 테이블에 그대로 저장됩니다.

@@ -36,7 +36,7 @@ def build_rows(ws, report: Dict) -> Dict[str, List[Dict]]:
             "video_id": v["bvid"], "platform": PLATFORM, "run_id": rid, "game_ids": v.get("game_ids") or [],
             "channel_id": v.get("author"), "title": v["title"], "views": v["view"], "likes": v["like"],
             "comments": v["reply"], "coins": v["coin"], "favorites": v["favorite"], "duration_sec": v.get("duration_sec"),
-            "is_short": (v.get("duration_sec") or 0) < 60, "published_at": _iso(v.get("pubdate")),
+            "is_short": v["duration_sec"] < 60 if v.get("duration_sec") else None, "published_at": _iso(v.get("pubdate")),
             "outlier_multiple": None, "views_per_hour": round(v["view"] / hours, 1) if hours else None})
     for s in ws.cache.get("game_scores") or []:
         c = s["components"]

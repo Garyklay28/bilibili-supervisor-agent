@@ -69,9 +69,12 @@ def classify_type(title: str) -> str:
 
 
 def duration_and_type_distribution(videos: List[Dict]) -> Dict:
+    # 길이를 모르는 영상(예: Aside JSON 에는 길이가 없음)은 0초로 세지 않고 길이 분포에서 뺀다.
+    # (2026-11-25 실제 실행에서 50개 전부 '1분 미만'으로 잡힌 오류 수정)
+    known = [v for v in videos if v.get("duration_sec")]
     buckets = []
     for lo, hi, label in DURATION_BUCKETS:
-        in_b = [v for v in videos if lo <= (v.get("duration_sec") or 0) < hi]
+        in_b = [v for v in known if lo <= v["duration_sec"] < hi]
         buckets.append({"bucket": label, "count": len(in_b),
                         "median_view": int(_median([v["view"] for v in in_b]))})
     types = {}
@@ -80,10 +83,11 @@ def duration_and_type_distribution(videos: List[Dict]) -> Dict:
         types.setdefault(t, []).append(v["view"])
     type_rows = sorted(({"type": t, "count": len(vs), "median_view": int(_median(vs))}
                         for t, vs in types.items()), key=lambda r: -r["count"])
-    most_common = max(buckets, key=lambda b: b["count"]) if videos else None
+    most_common = max(buckets, key=lambda b: b["count"]) if known else None
     best_median = max((b for b in buckets if b["count"] >= 2), key=lambda b: b["median_view"],
                       default=None)
     return {"duration_buckets": buckets, "type_distribution": type_rows,
+            "videos_with_duration": len(known), "videos_without_duration": len(videos) - len(known),
             "most_common_bucket": most_common and most_common["bucket"],
             "best_median_bucket(count>=2)": best_median and best_median["bucket"]}
 
