@@ -104,24 +104,57 @@ def test_aside_videos_korean_header_and_encoding(no_net, enc):
 
 
 def test_collector_prefers_fresh_aside_and_falls_back_when_stale(no_net, alias, monkeypatch):
+    monkeypatch.setattr(config, "MIN_FRESH_VIDEOS", 1)  # 신선한 영상 수 기준을 낮춰 '보충 없음' 경우를 본다
     write_aside(config.ASIDE_DIR, "bilibili_videos.csv", ASIDE_HEADER + "".join(ASIDE_ROWS))
     write_aside(config.ASIDE_DIR, "bilibili_hot_keywords.csv", "순위,키워드,열기\n1,原神新角色,900\n2,三角洲行动,800\n")
     write_aside(config.ASIDE_DIR, "bilibili_events.csv", "화제명,토픽id,참여영상수,조회수합\n原神5.5版本创作激励,77,12,340000\n")
     rep = BiliSupervisor(alias_store=alias).run_dry(BiliTask(intent="trend_scan")).to_dict()
     assert [s["name"] for s in rep["data_sources"]][:3] == ["Aside 영상", "Aside 핫키워드", "Aside 공식 활동·화제"]
-    assert not any("공개 API" in s["name"] for s in rep["data_sources"])  # 신선한 Aside 가 있으면 API 안 씀
+    assert not any("종합 인기" in s["name"] for s in rep["data_sources"])  # 신선한 Aside 영상이 있으면 영상 API 안 씀
+    assert any("핫서치" in s["name"] for s in rep["data_sources"])         # Aside 핫키워드 2개뿐 → 핫서치로 보충
     monkeypatch.setattr(config, "ASIDE_MAX_AGE_H", -1)                      # 모든 파일을 '오래됨'으로
     rep = BiliSupervisor(alias_store=alias).run_dry(BiliTask(intent="trend_scan")).to_dict()
     assert any("공개 API" in s["name"] for s in rep["data_sources"])
 
 
-def test_aside_event_bonus_in_scorer(no_net, alias):
+def test_aside_event_bonus_in_scorer(no_net, alias, monkeypatch):
+    monkeypatch.setattr(config, "MIN_FRESH_VIDEOS", 1)
     write_aside(config.ASIDE_DIR, "bilibili_videos.csv", ASIDE_HEADER + "".join(ASIDE_ROWS))
     write_aside(config.ASIDE_DIR, "bilibili_events.csv", "화제명,토픽id,참여영상수,조회수합\n原神5.5版本创作激励,77,12,340000\n")
     sup = BiliSupervisor(alias_store=alias)
     sup.run_dry(BiliTask(intent="event_watch"))
     gen = next(s for s in sup.last_ws.cache["game_scores"] if s["game_id"] == "genshin_impact")
     assert gen.get("aside_event_bonus") is True
+
+
+def _aside_json(pubdates):
+    return {"crawled_at": time.strftime("%Y-%m-%d %H:%M:%S"), "scope": "游戏区 + 游戏相关",
+            "hot_keywords": [{"rank": 1, "keyword": "将加盟LPL的韩援新面孔有哪些", "heat_score": 1095095, "is_game": True}],
+            "videos": [{"title": "《鸣潮》0.1版本PV | 缩拉里斯", "bvid": "BVold%d" % i if p.startswith("2025") else "BVnew%d" % i,
+                        "owner": "鸣潮", "category": "手机游戏",
+                        "source": "游戏区排行榜" if p.startswith("2025") else "综合热门(游戏相关)", "pubdate": p,
+                        "event_radar": {"view": 3607389, "like": 296195, "coin": 96790, "favorite": 49638, "share": 51996,
+                                        "reply": 16608, "danmaku": 30902, "rcmd_reason": ""},
+                        "official_event": {"mission_id": 4030240, "event_tags": ["鸣潮创作者激励计划"]},
+                        "tags": ["鸣潮"], "engagement_rate": 15.03} for i, p in enumerate(pubdates)]}
+
+
+def test_aside_json_and_old_videos_dropped(no_net, alias):
+    # 실제 Aside 수집(2026-11-25) 형식. '游戏区排行榜' 은 2025-04 에 멈춘 목록이라 오래된 영상은 빠져야 한다
+    recent = time.strftime("%Y-%m-%d %H:%M", time.gmtime(NOW - 3600 * 20))
+    config.ASIDE_DIR.mkdir(parents=True)
+    (config.ASIDE_DIR / "bilibili_2026-11-25.json").write_text(
+        json.dumps(_aside_json(["2025-03-31 20:17", "2025-04-01 11:00", recent]), ensure_ascii=False), encoding="utf-8")
+    j = aside_import.load_json()
+    assert len(j["videos"]) == 3 and j["videos"][0]["coin"] == 96790 and j["videos"][0]["mission_id"] == 4030240
+    assert j["events"][0] == {"name": "鸣潮创作者激励计划", "event_id": 4030240, "videos": 3, "total_view": 3607389 * 3}
+    sup = BiliSupervisor(alias_store=alias)
+    rep = sup.run_dry(BiliTask(intent="event_watch")).to_dict()
+    norm = sup.last_ws.cache["normalize"]
+    assert norm["old_by_source"] == {"aside:游戏区排行榜": 2}                # 1년 넘은 랭킹 영상 2개 제외
+    assert "BVnew2" in {v["bvid"] for v in sup.last_ws.videos}
+    assert any("공개 API" in s["name"] for s in rep["data_sources"])       # 신선한 영상이 30개 미만 → 보충
+    assert sup.last_ws.keywords[0]["keyword"] == "将加盟LPL的韩援新面孔有哪些"   # Aside 순위가 먼저
 
 
 # ── 정규화 · 6단계 구조 ─────────────────────────────────

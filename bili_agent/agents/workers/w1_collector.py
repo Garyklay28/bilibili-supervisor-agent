@@ -7,6 +7,8 @@
 LLM 이 하는 일: 어떤 출처를 쓸지 판단하고, 출처·신선도·표본 크기의 문제를 보고한다.
 DB(13장): raw_snapshots
 """
+import time
+from datetime import datetime, timezone
 from typing import Dict
 
 from ... import config
@@ -21,12 +23,30 @@ def _snapshot(ws: Workspace, source: str, meta: Dict, count: int) -> None:
         "fetched_at": meta.get("fetched_at"), "count": count})
 
 
+def _freshness(videos) -> Dict:
+    """게시 시각 기준 신선도. MAX_VIDEO_AGE_DAYS 보다 오래된 영상은 2 정규화에서 빠진다."""
+    now, limit = time.time(), config.MAX_VIDEO_AGE_DAYS * 86400
+    by_source: Dict[str, Dict] = {}
+    for v in videos:
+        r = by_source.setdefault(v.get("source", "?"), {"count": 0, "old": 0, "oldest": None, "newest": None})
+        r["count"] += 1
+        if v.get("pubdate"):
+            day = datetime.fromtimestamp(v["pubdate"], timezone.utc).strftime("%Y-%m-%d")
+            r["oldest"] = min(r["oldest"] or day, day)
+            r["newest"] = max(r["newest"] or day, day)
+            r["old"] += (now - v["pubdate"]) > limit
+    fresh = sum(r["count"] - r["old"] for r in by_source.values())
+    return {"max_video_age_days": config.MAX_VIDEO_AGE_DAYS, "fresh_videos": fresh,
+            "need_supplement": fresh < config.MIN_FRESH_VIDEOS, "by_source": by_source}
+
+
 def h_load_aside(ws: Workspace) -> Dict:
-    """Aside CSV 를 읽는다. 오래된 파일(ASIDE_MAX_AGE_H 초과)은 작업 공간에 넣지 않고 알려만 준다."""
-    out = {"max_age_h": config.ASIDE_MAX_AGE_H}
-    vids = aside_import.load_videos()
+    """Aside 결과(JSON 우선, 없으면 CSV)를 읽는다. 오래된 파일(ASIDE_MAX_AGE_H 초과)은 넣지 않고 알려만 준다."""
+    out = {"max_file_age_h": config.ASIDE_MAX_AGE_H}
+    j = aside_import.load_json()
+    vids = j or aside_import.load_videos()
     if vids is None:
-        out["videos"] = {"available": False, "note": "data/aside/*videos*.csv 없음"}
+        out["videos"] = {"available": False, "note": "data/aside/ 에 bilibili_*.json 이나 *videos*.csv 없음"}
     elif vids["age_h"] > config.ASIDE_MAX_AGE_H:
         out["videos"] = {"available": True, "used": False, "stale": True, "age_h": vids["age_h"], "file": vids["file"]}
     else:
@@ -37,15 +57,21 @@ def h_load_aside(ws: Workspace) -> Dict:
                          "encoding": vids["encoding"], "rows_total": vids["rows_total"],
                          "rows_non_game_dropped": vids["rows_non_game"], "game_videos_added": added,
                          "partition_column_found": vids["partition_known"],
-                         "unmapped_columns": vids["unmapped_columns"][:10]}
-    kws = aside_import.load_keywords()
+                         "unmapped_columns": vids["unmapped_columns"][:10],
+                         "freshness": _freshness(vids["videos"])}
+    fresh_file = j is not None and j["age_h"] <= config.ASIDE_MAX_AGE_H
+    kws = ({"keywords": j["keywords"], "origin": "aside", "file": j["file"], "age_h": j["age_h"]}
+           if fresh_file else aside_import.load_keywords())
     if kws and kws["age_h"] <= config.ASIDE_MAX_AGE_H and kws["keywords"]:
         ws.keywords = kws["keywords"]
         ws.add_source("Aside 핫키워드", kws)
         out["keywords"] = {"used": True, "count": len(kws["keywords"]), "file": kws["file"]}
+        if len(kws["keywords"]) < 20:
+            out["keywords"]["note"] = "Aside 핫키워드가 %d개뿐 — 공개 API 핫서치(30개)로 보충 가능" % len(kws["keywords"])
     else:
         out["keywords"] = {"used": False, "reason": "없음" if kws is None else "오래됨 또는 비어 있음"}
-    evs = aside_import.load_events()
+    evs = ({"events": j["events"], "origin": "aside", "file": j["file"], "age_h": j["age_h"]}
+           if fresh_file else aside_import.load_events())
     if evs and evs["age_h"] <= config.ASIDE_MAX_AGE_H:
         ws.aside_events = evs["events"]
         ws.add_source("Aside 공식 활동·화제", evs)
@@ -65,10 +91,12 @@ def h_collect_popular_games(ws: Workspace, pages: int = config.POPULAR_PAGES) ->
 
 
 def h_collect_trending(ws: Workspace) -> Dict:
-    if ws.keywords:
-        return {"skipped": True, "reason": "이미 Aside 핫키워드가 있음", "count": len(ws.keywords)}
+    if len(ws.keywords) >= 20:
+        return {"skipped": True, "reason": "이미 Aside 핫키워드가 충분함", "count": len(ws.keywords)}
     data = bilibili_api.fetch_trending_keywords()
-    ws.keywords = data["keywords"]
+    have = {k["keyword"] for k in ws.keywords}
+    extra = [dict(k, rank=len(ws.keywords) + i + 1) for i, k in enumerate(k for k in data["keywords"] if k["keyword"] not in have)]
+    ws.keywords = ws.keywords + extra  # Aside 순위를 먼저 두고 공개 API 핫서치로 보충
     ws.add_source("공개 API · 실시간 핫서치", data)
     return {"origin": data["origin"], "count": len(ws.keywords), "top10": [k["keyword"] for k in ws.keywords[:10]]}
 

@@ -110,8 +110,8 @@ class BiliSupervisor:
             if worker == "collector":
                 h = spec.handlers
                 a = h["load_aside"](ws)
-                if not a["videos"].get("used"):
-                    h["collect_popular_games"](ws)
+                if not a["videos"].get("used") or a["videos"]["freshness"]["need_supplement"]:
+                    h["collect_popular_games"](ws)  # Aside 가 없거나, 최근 게시 영상이 부족하면 보충
                 h["collect_trending"](ws)
                 h["load_ranking_snapshot"](ws)
                 ws.findings[worker] = {"summary_ko": "(dry-run) 게임 영상 %d개, 핫키워드 %d개 수집" % (

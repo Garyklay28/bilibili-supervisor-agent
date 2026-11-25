@@ -16,6 +16,7 @@
 """
 import csv
 import io
+import json
 import time
 from datetime import datetime, timezone
 from pathlib import Path
@@ -133,6 +134,58 @@ def _epoch(v: str) -> Optional[float]:
 def _latest(pattern: str) -> Optional[Path]:
     files = sorted(config.ASIDE_DIR.glob(pattern), key=lambda p: p.stat().st_mtime)
     return files[-1] if files else None
+
+
+def _latest_json() -> Optional[Path]:
+    files = sorted(config.ASIDE_DIR.glob("bilibili_*.json"), key=lambda p: p.stat().st_mtime)
+    return files[-1] if files else None
+
+
+def _local_ts(s: str) -> Optional[float]:
+    try:
+        return datetime.strptime(s[:19], "%Y-%m-%d %H:%M:%S").timestamp()  # Aside crawled_at: 로컬 시각
+    except (ValueError, TypeError):
+        return None
+
+
+def load_json() -> Optional[Dict]:
+    """Aside 크롤러 JSON (bilibili_YYYY-MM-DD.json) → 영상·핫키워드·공식 활동.
+
+    형식: {crawled_at, scope, hot_keywords:[{rank,keyword,heat_score,is_game}],
+           videos:[{bvid,title,owner,category,source,pubdate,event_radar:{view,like,coin,favorite,share,reply,danmaku},
+                    official_event:{mission_id,event_tags[]}, tags[]}]}
+    반응률·제목 진단 같은 Aside 계산값은 쓰지 않고 원본 수치로 다시 계산한다(공식이 다름: Aside 는 댓글 포함).
+    """
+    path = _latest_json()
+    if path is None:
+        return None
+    raw = json.loads(path.read_text(encoding="utf-8"))
+    crawled = _local_ts(raw.get("crawled_at", ""))
+    age_h = (time.time() - (crawled or path.stat().st_mtime)) / 3600
+    videos, events = [], {}
+    for v in raw.get("videos", []):
+        st = v.get("event_radar") or {}
+        oe = v.get("official_event") or {}
+        videos.append({
+            "bvid": v["bvid"], "title": v.get("title", ""), "tid": None, "tname": v.get("category"),
+            "tname_v2": v.get("category"), "pubdate": _epoch(v.get("pubdate", "")), "duration_sec": None,
+            "view": int(st.get("view") or 0), "like": int(st.get("like") or 0), "coin": int(st.get("coin") or 0),
+            "favorite": int(st.get("favorite") or 0), "share": int(st.get("share") or 0),
+            "reply": int(st.get("reply") or 0), "danmaku": int(st.get("danmaku") or 0),
+            "author": v.get("owner"), "mission_id": oe.get("mission_id") or None,
+            "event_tags": list(oe.get("event_tags") or []), "tags": list(v.get("tags") or []),
+            "rank": None, "source": "aside:" + (v.get("source") or "videos")})
+        for tag in oe.get("event_tags") or []:
+            e = events.setdefault(tag, {"name": tag, "event_id": oe.get("mission_id") or "", "videos": 0, "total_view": 0})
+            e["videos"] += 1
+            e["total_view"] += int(st.get("view") or 0)
+    kws = [{"keyword": k["keyword"], "show_name": k["keyword"], "heat_score": k.get("heat_score", 0),
+            "rank": k.get("rank") or i + 1, "aside_is_game": k.get("is_game")}
+           for i, k in enumerate(raw.get("hot_keywords", [])) if k.get("keyword")]
+    return {"videos": videos, "keywords": kws, "events": sorted(events.values(), key=lambda e: -e["total_view"]),
+            "origin": "aside", "file": path.name, "age_h": round(age_h, 1), "crawled_at": raw.get("crawled_at"),
+            "scope": raw.get("scope"), "endpoint": "aside:" + path.name, "encoding": "utf-8",
+            "rows_total": len(videos), "rows_non_game": 0, "partition_known": True, "unmapped_columns": []}
 
 
 def load_videos(game_only: bool = True) -> Optional[Dict]:
