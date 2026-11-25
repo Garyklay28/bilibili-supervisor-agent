@@ -127,10 +127,17 @@ EVENT_BONUS = 0.2
 WEIGHTS = {"demand": 1.0, "outlier": 1.0, "freshness": 1.0, "competition": 1.0}  # 기획안: 초기 동일 가중치
 
 
+def games_of(v: Dict, alias_store) -> List[Dict]:
+    """정규화 단계가 붙인 game_ids 를 우선 쓰고, 없으면 제목·태그에서 별칭으로 찾는다."""
+    if v.get("game_ids") is not None:
+        return [g for g in (alias_store.resolve_id(i) for i in v["game_ids"]) if g]
+    return alias_store.find_in_text(v["title"] + " " + " ".join(v.get("tags") or []))
+
+
 def aggregate_by_game(videos: List[Dict], alias_store) -> Dict[str, Dict]:
     games = {}
     for v in videos:
-        for g in alias_store.find_in_text(v["title"]):
+        for g in games_of(v, alias_store):
             row = games.setdefault(g["game_id"], {"game": g, "videos": []})
             row["videos"].append(v)
     return games
@@ -155,7 +162,7 @@ def event_signals(videos: List[Dict], alias_store) -> List[Dict]:
     for v in videos:
         if not v.get("mission_id"):
             continue
-        games = alias_store.find_in_text(v["title"]) or [{"game_id": "unmatched", "zh": "(미매칭)"}]
+        games = games_of(v, alias_store) or [{"game_id": "unmatched", "zh": "(미매칭)"}]
         for g in games:
             r = rows.setdefault((g["game_id"], v["mission_id"]),
                                 {"game_id": g["game_id"], "game_zh": g["zh"], "mission_id": v["mission_id"],

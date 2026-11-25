@@ -1,8 +1,7 @@
 """게임 별칭 사전 (기획안: '별칭 사전으로 한·중·영 표기 통일').
 
-SUPABASE_URL / SUPABASE_KEY 가 설정되어 있으면 Supabase REST(PostgREST)에서 game_alias 테이블을 읽고,
+SUPABASE_URL / SUPABASE_KEY 가 설정되어 있으면 팀 공용 DB(기획안 13장)의 games·game_aliases 테이블을 읽고,
 없으면 data/alias_dictionary.json 을 쓴다. 두 구현은 같은 인터페이스(resolve / find_in_text)를 가진다.
-테이블 정의는 supabase/schema.sql 참고.
 """
 import json
 import urllib.request
@@ -60,9 +59,19 @@ def _word_hit(text: str, word: str) -> bool:
     return False
 
 
-def _load_from_supabase() -> List[Dict]:
-    url = config.SUPABASE_URL.rstrip("/") + "/rest/v1/game_alias?select=game_id,zh,ko,en,aliases"
-    req = urllib.request.Request(url, headers={"apikey": config.SUPABASE_KEY,
-                                               "Authorization": "Bearer " + config.SUPABASE_KEY})
+def _get(path: str) -> List[Dict]:
+    req = urllib.request.Request(config.SUPABASE_URL.rstrip("/") + "/rest/v1/" + path,
+                                 headers={"apikey": config.SUPABASE_KEY, "Authorization": "Bearer " + config.SUPABASE_KEY})
     with urllib.request.urlopen(req, timeout=config.HTTP_TIMEOUT) as resp:
         return json.loads(resp.read().decode("utf-8"))
+
+
+def _load_from_supabase() -> List[Dict]:
+    """팀 공용 DB(기획안 13장)의 games + game_aliases 를 읽어 로컬 사전과 같은 모양으로 바꾼다."""
+    games = {g["game_id"]: {"game_id": g["game_id"], "zh": g.get("name_zh") or g["game_id"],
+                            "ko": g.get("name_ko") or g["game_id"], "en": g.get("name_en") or g["game_id"], "aliases": []}
+             for g in _get("games?select=game_id,name_ko,name_en,name_zh")}
+    for a in _get("game_aliases?select=alias,game_id,platform"):
+        if a["game_id"] in games and a.get("platform") in (None, "", "bilibili"):
+            games[a["game_id"]]["aliases"].append(a["alias"])
+    return list(games.values())
